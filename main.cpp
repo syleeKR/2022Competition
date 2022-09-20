@@ -76,6 +76,7 @@ struct PGinfo
       
 };
 vector<PGinfo> pgtype(1);
+int memorynumofpg[13502]; //for n_affinity, it has to be in the same memory
 
 
 
@@ -381,11 +382,11 @@ vector<int> naivefill1_rack(VM vm0, int network, int rack)   //only need to sati
 bool allocate1(vector<VM> & vms, vector< vector<int> > & answer)
 {
     // 0 . vm, answer are zero based
-    // 1.update the storage
+    // 1.update the storage, leftover
     // 2. udate answer vector
     // 3. return possibility
 
-    //vms shares the same vm property and are in sam pg!!(might have different partition)
+    //vms shares the same vm property and are in same pg!!(might have different partition)
 
     int n = sz(vms);
 
@@ -428,6 +429,19 @@ bool allocate1(vector<VM> & vms, vector< vector<int> > & answer)
                 {
                     
                     breaked=true;
+                    // 되돌리기
+                    for(int j=0; j<i;j++)
+                    {
+                        int network_index = answer[j][0];
+                        int rack_index = answer[j][1];
+                        int pm_index = answer[j][2];
+                        int numa_index = answer[j][3];
+                        Numanode & target = leftover[network_index][rack_index][pm_index][numa_index];   
+                        set<int> &s = storage[network_index][rack_index][pm_index][numa_index]; 
+                        target.cpu += cpu;
+                        target.memory += memory;
+                        s.erase(vms[j].index);
+                    }
                     break;
                 }
 
@@ -448,8 +462,10 @@ bool allocate1(vector<VM> & vms, vector< vector<int> > & answer)
     }
     else if(naffinity==2)
     {
-        possible =false;
 
+        int predefined = memorynumofpg[vms[0].pg.index];
+        if(predefined==0){
+            possible=false;
         for(int network = 1; network<=nNetwork;network++)
         {
             bool breaked = false;
@@ -465,6 +481,20 @@ bool allocate1(vector<VM> & vms, vector< vector<int> > & answer)
             
                 if(sz(v)==0)
                 {
+
+                    // 되돌리기
+                    for(int j=0; j<i;j++)
+                    {
+                        int network_index = answer[j][0];
+                        int rack_index = answer[j][1];
+                        int pm_index = answer[j][2];
+                        int numa_index = answer[j][3];
+                        Numanode & target = leftover[network_index][rack_index][pm_index][numa_index];   
+                        set<int> &s = storage[network_index][rack_index][pm_index][numa_index]; 
+                        target.cpu += cpu;
+                        target.memory += memory;
+                        s.erase(vms[j].index);
+                    }
                     
                     breaked=true;
                     break;
@@ -475,10 +505,37 @@ bool allocate1(vector<VM> & vms, vector< vector<int> > & answer)
             }
             if(breaked==false)
             {
+                //이제 이 pg의 vm들은 반드시 이 network에 들어와야함.
+                memorynumofpg[vms[0].pg.index] = network;
                 possible=true;
                 break;
             }
                
+        }
+        }
+        else{
+            int network = predefined;
+
+            REP0(i, n)
+            {
+                VM x = vms[i];
+
+                vint v;
+
+            
+                
+                v = naivefill1_network(x, network);
+            
+                if(sz(v)==0)
+                {
+                    possible = false;
+                    break;
+                }
+
+                answer[i] = v;
+
+            }
+
         }
 
     }
@@ -780,6 +837,24 @@ bool allocate2(vector<VM> & vms, vector< vector<int> > & answer)
             
                 if(sz(v)==0)
                 {
+                    for(int j=0; j<i;j++)
+                    {
+                        int network_index = answer[j][0];
+                        int rack_index = answer[j][1];
+                        int pm_index = answer[j][2];
+                        int numa_index1 = answer[j][3];
+                        int numa_index2 = answer[j][4];
+                        Numanode & target1 = leftover[network_index][rack_index][pm_index][numa_index1];   
+                        set<int> &s1 = storage[network_index][rack_index][pm_index][numa_index1]; 
+                        target1.cpu += cpu;
+                        target1.memory += memory;
+                        s1.erase(vms[j].index);
+                        Numanode & target2 = leftover[network_index][rack_index][pm_index][numa_index2];   
+                        set<int> &s2 = storage[network_index][rack_index][pm_index][numa_index2]; 
+                        target2.cpu += cpu;
+                        target2.memory += memory;
+                        s2.erase(vms[j].index);
+                    }
                     breaked=true;
                     break;
                 }
@@ -801,8 +876,11 @@ bool allocate2(vector<VM> & vms, vector< vector<int> > & answer)
     }
     else if(naffinity==2)
     {
-        possible =false;
 
+        int predefined = memorynumofpg[vms[0].pg.index];
+
+        if(predefined==0){
+            possible = false;
         for(int network = 1; network<=nNetwork;network++)
         {
             bool breaked = false;
@@ -818,6 +896,24 @@ bool allocate2(vector<VM> & vms, vector< vector<int> > & answer)
             
                 if(sz(v)==0)
                 {
+                    for(int j=0; j<i;j++)
+                    {
+                        int network_index = answer[j][0];
+                        int rack_index = answer[j][1];
+                        int pm_index = answer[j][2];
+                        int numa_index1 = answer[j][3];
+                        int numa_index2 = answer[j][4];
+                        Numanode & target1 = leftover[network_index][rack_index][pm_index][numa_index1];   
+                        set<int> &s1 = storage[network_index][rack_index][pm_index][numa_index1]; 
+                        target1.cpu += cpu;
+                        target1.memory += memory;
+                        s1.erase(vms[j].index);
+                        Numanode & target2 = leftover[network_index][rack_index][pm_index][numa_index2];   
+                        set<int> &s2 = storage[network_index][rack_index][pm_index][numa_index2]; 
+                        target2.cpu += cpu;
+                        target2.memory += memory;
+                        s2.erase(vms[j].index);
+                    }
                     breaked=true;
                     break;
                 }
@@ -827,10 +923,37 @@ bool allocate2(vector<VM> & vms, vector< vector<int> > & answer)
             }
             if(breaked==false)
             {
+                memorynumofpg[vms[0].pg.index] = network;
+
                 possible=true;
                 break;
             }
                
+        }
+        }
+        else{
+            int network = predefined;
+
+            REP0(i, n)
+            {
+                VM x = vms[i];
+
+                vint v;
+
+            
+                
+                v = naivefill2_network(x, network);
+            
+                if(sz(v)==0)
+                {
+                    possible = false;
+                    break;
+                }
+
+                answer[i] = v;
+
+            }
+
         }
 
     }

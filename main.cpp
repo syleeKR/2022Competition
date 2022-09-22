@@ -37,12 +37,10 @@ const int inf = INT_MAX;
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
 //////////////////////////////////////// important variables ////////////////////////////////////////////
 
+int timecutoff = 15000;
 
 int nNetwork, nRack, nPm, nNuma; 
 
-vector<int> permutation;
-vector<int> permutation2;
-vector<int> permutation3;
 int nTotal;
 
 
@@ -76,7 +74,7 @@ struct PGinfo
       
 };
 vector<PGinfo> pgtype(1);
-int memorynumofpg[13502]; //for n_affinity, it has to be in the same memory
+int networknumofpg[13502]; //for n_affinity, it has to be in the same network
 
 
 
@@ -87,6 +85,7 @@ struct VM
     PGinfo pg;
     VMinfo info; 
     int partition;
+    vint loc;
 };
 vector<VM> vm(1);   
 
@@ -95,50 +94,1254 @@ vector<VM> vm(1);
 // storage[network][rack][pm][numa] : set of integers representing the Vms
 vector<vector<vector<vector<  set<int>    >>>> storage;
 vector<vector<vector<vector<     Numanode      >>>> leftover;
-// family[i] : all indices of vm in ith pg.
-// set<int> family[13501];
 
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
-//////////////////////////////////////// delte algorithms /////////////////////////////////////////////////
+//////////////////////////////////////// useful algorithms /////////////////////////////////////////////////
 
-vector<int> findVM(int index)
+
+//print 2d vector of ints
+void print2d(vector<vint> & v)
 {
-    // given the index of vm, find the network , rack, pm, numanode
-    // numanode can be 1 or 2 depending on vm[index].info.numcount
-    vector<int> temp;
-    int found = 0;    
+    int n = sz(v);
+    int m = sz(v[0]);
+
+    REP0(i,n)
+    {
+        REP0(j,m)
+        {
+            cout<<v[i][j]<<" ";
+        }
+        cout<<endl;
+    }
+}
+
+//get random num from 1~n
+int random(int n)
+{
+    return (rand()%n)+1;
+}
+//next index considering circular relation
+void next(int & a, int N)
+{
+    a = (a%N) + 1;
+}
+
+
+//update storage and leftover
+// We allocate vm0 in the given position
+//update location of vm[vm0.index]
+//O(1)
+void update(VM  vm0, int network, int rack, int pm, int numa)
+{
+    int cpu = vm0.info.cpu;
+    int memory = vm0.info.memory;
+    int type = vm0.info.numacount;
+    int index = vm0.index;
+
+    if(type==2 && numa%2==0)numa--;
+
+    Numanode & l1 = leftover[network][rack][pm][numa];
+    set<int> & s1 = storage[network][rack][pm][numa];
+
+    Numanode & l2 = leftover[network][rack][pm][numa+type-1];
+    set<int> & s2 = storage[network][rack][pm][numa+type-1];
+
+    if(type==1)
+    {
+        l1.cpu-=cpu; l1.memory -= memory; s1.insert(index);
+    }
+    else
+    {
+        l1.cpu -= cpu; l1.memory -= memory; s1.insert(index);
+        l2.cpu -= cpu; l2.memory -= memory; s2.insert(index);
+    }
+    vm[index].loc = {network, rack, pm, numa};
+}
+
+//decide whether we can allocate vm0 in the given position
+// consider cpu,memory, type
+// don't consider partition in this case
+//O(1)
+bool canallocate(VM vm0, int network, int rack, int pm, int numa)
+{
+    int cpu = vm0.info.cpu;
+    int memory = vm0.info.memory;
+    int type = vm0.info.numacount;
+    if(type==2 && numa%2==0)numa--;
+    Numanode l  = leftover[network][rack][pm][numa];
+    Numanode l2  = leftover[network][rack][pm][numa+type-1];
+
+    if(cpu <= l.cpu && memory<=l.memory && cpu<=l2.cpu && memory <= l2.memory)return true;
+    return false;
+}
+
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+// determine wheter we can allocate a vm of partition p in this rack
+//O(#VM : 235000)
+bool partitioncheck(int network, int rack, int pgindex, int p)
+{
+    for(int pm_index = 1; pm_index <= nPm; pm_index++)
+    {
+        for(int numa_index =1 ; numa_index<=nNuma; numa_index++)
+        {
+            for( auto x : storage[network][rack][pm_index][numa_index])
+            {
+                if(vm[x].pg.index == pgindex && vm[x].partition!=p && vm[x].pg.npartition!=0)
+                {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+
+// determine if the rack contains vm with pg = pgindex, partition = p 
+// O(#VM :  235000)
+bool exist(int pgindex, int p, int network, int rack)
+{
+    for(int pm_index = 1; pm_index <= nPm; pm_index++)
+    {
+        for(int numa_index =1 ; numa_index<=nNuma; numa_index++)
+        {
+            for( auto x : storage[network][rack][pm_index][numa_index])
+            {
+                if(vm[x].pg.index == pgindex && vm[x].partition==p)
+                {
+                    return true;
+
+                }
+            }
+        }
+    }
+    return false;
+
+}
+
+// find all racks that have vms that are in pg : pgindex and partition : p
+//O(16384, 235000)
+vector<pii> findallrack(int pgindex, int p)
+{
+    vector<pii> racks;
+    for (int network_index=1; network_index<=nNetwork; network_index++)
+    {
+        for (int rack_index=1; rack_index<=nRack; rack_index++)
+        {
+            if(exist(pgindex, p, network_index, rack_index))
+            {
+                racks.pb({network_index, rack_index});
+            }
+            
+        }
+    }
+    return racks;
+}
+
+vector<pii> findallrack(int pgindex, int p, int network)
+{
+    vector<pii> racks;
+    
+        for (int rack_index=1; rack_index<=nRack; rack_index++)
+        {
+            if(exist(pgindex, p, network, rack_index))
+            {
+                racks.pb({network, rack_index});
+            }
+            
+        }
+    
+    return racks;
+}
+
+vector<pii> possiblerack(int pgindex, int p)
+{
+    vector<pii> racks;
+    for (int network_index=1; network_index<=nNetwork; network_index++)
+    {
+        for (int rack_index=1; rack_index<=nRack; rack_index++)
+        {
+            if(partitioncheck( network_index, rack_index,pgindex,p))
+            {
+                racks.pb({network_index, rack_index});
+            }
+            
+        }
+    }
+    return racks;
+
+}
+
+vector<pii> possiblerack(int pgindex, int p, int network)
+{
+    vector<pii> racks;
+    int network_index = network;
+        for (int rack_index=1; rack_index<=nRack; rack_index++)
+        {
+            if(partitioncheck( network_index, rack_index,pgindex,p))
+            {
+                racks.pb({network_index, rack_index});
+            }
+            
+        }
+    
+    return racks;
+
+}
+////////////////////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////////// maxallocate /////////////////////////////////////////////////////////
+
+// determine the max vm that we can allocate in resource considering partition
+//O(16384, 235000)
+int maxallocate_constraint(vector<VM> & vms, int pgindex, int p)
+{
+    int n =sz(vms);
+    int cpu = vms[0].info.cpu;
+    int memory = vms[0].info.memory;
+    int type = vms[0].info.numacount;
+
+    int possiblevm = 0;
+    
+    if(type==1)
+    {
+        for(int network_index = 1; network_index<=nNetwork; network_index++)
+        {
+            for(int rack_index = 1; rack_index <= nRack; rack_index++)
+            {
+                if(partitioncheck(network_index, rack_index, pgindex, p))
+                {
+                for(int pm_index = 1; pm_index <=nPm; pm_index++)
+                {
+                    for(int numa_index =1; numa_index <= nNuma; numa_index++)
+                    {
+                        int leftovercpu = leftover[network_index][rack_index][pm_index][numa_index].cpu;
+                        int leftovermemory = leftover[network_index][rack_index][pm_index][numa_index].memory;
+                        possiblevm += min(leftovercpu/cpu , leftovermemory/memory);
+                    }
+                }
+                }
+            }
+        }
+    }
+    else
+    {
+        for(int network_index = 1; network_index<=nNetwork; network_index++)
+        {
+            for(int rack_index = 1; rack_index <= nRack; rack_index++)
+            {
+                if(partitioncheck(network_index, rack_index, pgindex, p)){
+                for(int pm_index = 1; pm_index <=nPm; pm_index++)
+                {
+                    for(int numa_index =1; numa_index <= nNuma/2; numa_index++)
+                    {
+                        int leftovercpu1 = leftover[network_index][rack_index][pm_index][numa_index*2-1].cpu;
+                        int leftovermemory1 = leftover[network_index][rack_index][pm_index][numa_index*2-1].memory;
+
+                        int leftovercpu2 = leftover[network_index][rack_index][pm_index][numa_index*2].cpu;
+                        int leftovermemory2 = leftover[network_index][rack_index][pm_index][numa_index*2].memory;
+
+                        possiblevm += min(min(leftovercpu1/cpu , leftovermemory1/memory), min(leftovercpu2/cpu , leftovermemory2/memory));
+                    }
+                }
+                }
+            }
+        }
+    }
+
+    return possiblevm;
+}
+
+
+int maxallocate_constraint(vector<VM> & vms, int pgindex, int p, int network)
+{
+    int n =sz(vms);
+    int cpu = vms[0].info.cpu;
+    int memory = vms[0].info.memory;
+    int type = vms[0].info.numacount;
+
+    int possiblevm = 0;
+    
+    if(type==1)
+    {
+        int network_index = network;
+            for(int rack_index = 1; rack_index <= nRack; rack_index++)
+            {
+                if(partitioncheck(network_index, rack_index, pgindex, p))
+                {
+                for(int pm_index = 1; pm_index <=nPm; pm_index++)
+                {
+                    for(int numa_index =1; numa_index <= nNuma; numa_index++)
+                    {
+                        int leftovercpu = leftover[network_index][rack_index][pm_index][numa_index].cpu;
+                        int leftovermemory = leftover[network_index][rack_index][pm_index][numa_index].memory;
+                        possiblevm += min(leftovercpu/cpu , leftovermemory/memory);
+                    }
+                }
+                }
+            }
+        
+    }
+    else
+    {
+        int network_index = network;
+            for(int rack_index = 1; rack_index <= nRack; rack_index++)
+            {
+                if(partitioncheck(network_index, rack_index, pgindex, p)){
+                for(int pm_index = 1; pm_index <=nPm; pm_index++)
+                {
+                    for(int numa_index =1; numa_index <= nNuma/2; numa_index++)
+                    {
+                        int leftovercpu1 = leftover[network_index][rack_index][pm_index][numa_index*2-1].cpu;
+                        int leftovermemory1 = leftover[network_index][rack_index][pm_index][numa_index*2-1].memory;
+
+                        int leftovercpu2 = leftover[network_index][rack_index][pm_index][numa_index*2].cpu;
+                        int leftovermemory2 = leftover[network_index][rack_index][pm_index][numa_index*2].memory;
+
+                        possiblevm += min(min(leftovercpu1/cpu , leftovermemory1/memory), min(leftovercpu2/cpu , leftovermemory2/memory));
+                    }
+                }
+                }
+            }
+        
+    }
+
+    return possiblevm;
+}
+//determine the max vm that we can allocate in resource
+// No consideration of partition
+int maxallocate(vector<VM> & vms)
+{
+    int n =sz(vms);
+    int cpu = vms[0].info.cpu;
+    int memory = vms[0].info.memory;
+    int type = vms[0].info.numacount;
+
+    int possiblevm = 0;
+    
+    if(type==1)
+    {
+        for(int network_index = 1; network_index<=nNetwork; network_index++)
+        {
+            for(int rack_index = 1; rack_index <= nRack; rack_index++)
+            {
+                for(int pm_index = 1; pm_index <=nPm; pm_index++)
+                {
+                    for(int numa_index =1; numa_index <= nNuma; numa_index++)
+                    {
+                        int leftovercpu = leftover[network_index][rack_index][pm_index][numa_index].cpu;
+                        int leftovermemory = leftover[network_index][rack_index][pm_index][numa_index].memory;
+                        possiblevm += min(leftovercpu/cpu , leftovermemory/memory);
+                    }
+                }
+            }
+        }
+    }
+    else
+    {
+        for(int network_index = 1; network_index<=nNetwork; network_index++)
+        {
+            for(int rack_index = 1; rack_index <= nRack; rack_index++)
+            {
+                for(int pm_index = 1; pm_index <=nPm; pm_index++)
+                {
+                    for(int numa_index =1; numa_index <= nNuma/2; numa_index++)
+                    {
+                        int leftovercpu1 = leftover[network_index][rack_index][pm_index][numa_index*2-1].cpu;
+                        int leftovermemory1 = leftover[network_index][rack_index][pm_index][numa_index*2-1].memory;
+
+                        int leftovercpu2 = leftover[network_index][rack_index][pm_index][numa_index*2].cpu;
+                        int leftovermemory2 = leftover[network_index][rack_index][pm_index][numa_index*2].memory;
+
+                        possiblevm += min(min(leftovercpu1/cpu , leftovermemory1/memory), min(leftovercpu2/cpu , leftovermemory2/memory));
+                    }
+                }
+            }
+        }
+    }
+
+    return possiblevm;
+}
+
+//determine the max vm that we can allocate in network
+// No consideration of partition
+int maxallocate(vector<VM> & vms, int network)
+{
+    int n =sz(vms);
+    int cpu = vms[0].info.cpu;
+    int memory = vms[0].info.memory;
+    int type = vms[0].info.numacount;
+
+    int possiblevm = 0;
+    
+    if(type==1)
+    {
+        
+        for(int rack_index = 1; rack_index <= nRack; rack_index++)
+        {
+            for(int pm_index = 1; pm_index <=nPm; pm_index++)
+            {
+                for(int numa_index =1; numa_index <= nNuma; numa_index++)
+                {
+                    int leftovercpu = leftover[network][rack_index][pm_index][numa_index].cpu;
+                    int leftovermemory = leftover[network][rack_index][pm_index][numa_index].memory;
+                    possiblevm += min(leftovercpu/cpu , leftovermemory/memory);
+                }
+            }
+        }
+    }
+    else
+    {
+        for(int rack_index = 1; rack_index <= nRack; rack_index++)
+        {
+            for(int pm_index = 1; pm_index <=nPm; pm_index++)
+            {
+                for(int numa_index =1; numa_index <= nNuma/2; numa_index++)
+                {
+                    int leftovercpu1 = leftover[network][rack_index][pm_index][numa_index*2-1].cpu;
+                    int leftovermemory1 = leftover[network][rack_index][pm_index][numa_index*2-1].memory;
+
+                    int leftovercpu2 = leftover[network][rack_index][pm_index][numa_index*2].cpu;
+                    int leftovermemory2 = leftover[network][rack_index][pm_index][numa_index*2].memory;
+
+                    possiblevm += min(min(leftovercpu1/cpu , leftovermemory1/memory), min(leftovercpu2/cpu , leftovermemory2/memory));
+                }
+            }
+        }        
+    }
+
+    return possiblevm;
+}
+
+
+//determine the max vm that we can allocate in rack
+// No consideration of partition
+int maxallocate(vector<VM> & vms, int network, int rack)
+{
+    int n =sz(vms);
+    int cpu = vms[0].info.cpu;
+    int memory = vms[0].info.memory;
+    int type = vms[0].info.numacount;
+
+    int possiblevm = 0;
+    
+    if(type==1)
+    {
+        for(int pm_index = 1; pm_index <=nPm; pm_index++)
+        {
+            for(int numa_index =1; numa_index <= nNuma; numa_index++)
+            {
+                int leftovercpu = leftover[network][rack][pm_index][numa_index].cpu;
+                int leftovermemory = leftover[network][rack][pm_index][numa_index].memory;
+
+                possiblevm += min(leftovercpu/cpu , leftovermemory/memory);
+            }
+        }
+    }
+    else
+    {
+        for(int pm_index = 1; pm_index <=nPm; pm_index++)
+        {
+            for(int numa_index =1; numa_index <= nNuma/2; numa_index++)
+            {
+                int leftovercpu1 = leftover[network][rack][pm_index][numa_index*2-1].cpu;
+                int leftovermemory1 = leftover[network][rack][pm_index][numa_index*2-1].memory;
+
+                int leftovercpu2 = leftover[network][rack][pm_index][numa_index*2].cpu;
+                int leftovermemory2 = leftover[network][rack][pm_index][numa_index*2].memory;
+
+                possiblevm += min(min(leftovercpu1/cpu , leftovermemory1/memory), min(leftovercpu2/cpu , leftovermemory2/memory));
+            }
+        }
+
+    }
+
+    return possiblevm;
+}
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////////////////
+/////////////////////////////////// Calculate the most "unused" rack //////////////////////////////////////
+// If multiple racks have same capacity, we randomly choose
+
+
+// The candidates are "all racks"
+// O(235000)
+pii find_min_rack(vector<VM> & vms)
+{
+    vector<pii> candidate;
+
+    vector<vint> count(nNetwork+1);
+    int maxval = -1;
+
+    for(int i=1; i<=nNetwork; i++)
+    {
+        count[i].pb(-100);
+        for(int j = 1 ; j<=nRack; j++)
+        {
+
+            count[i].pb( maxallocate(vms, i , j) );
+            maxval = max(maxval, count[i][j]);
+        }
+    }
     REP1(i, nNetwork)
     {
         REP1(j, nRack)
         {
-            REP1(k, nPm)
-            {
-                REP1(l, nNuma)
-                {
-                    if( storage[i][j][k][l].count(index))
-                    {
-                        if(found==0)
-                        {
-                            temp.pb(i);temp.pb(j); temp.pb(k); temp.pb(l);
-                            found++;
-                        }
-                        else
-                        {
-                            temp.pb(l);
-                            found++;
-                        }
-                    }
-                }
-                if(found!=0)
-                {
-                    break;
-                }
+            if(count[i][j] ==maxval)candidate.pb({i,j});
+        }
+    }
 
+    int random_index = rand() % sz(candidate);
+    return candidate[random_index];
+}
+
+pii find_min_rack(vector<VM> & vms, int network)
+{
+    vector<pii> candidate;
+
+    vector<int> count(nRack+1);
+    int maxval = -1;
+
+    
+    for(int j = 1 ; j<=nRack; j++)
+    {
+
+        count[j] = maxallocate(vms, network , j) ;
+        maxval = max(maxval, count[j]);
+    }
+    
+    
+    REP1(j, nRack)
+    {
+        if(count[j] ==maxval)candidate.pb({network,j});
+    }
+    
+
+    int random_index = rand() % sz(candidate);
+    return candidate[random_index];
+}
+
+// The candidates are explicitly given
+pii find_min_rack_among_candidates(vector<VM> & vms, vpii & candidates)
+{
+    vector<pii> candidate;
+
+    map<pii, int> count;
+    int maxval = -1;
+
+    for (auto x : candidates)
+    {
+        int temp = maxallocate(vms, x.fi, x.se);
+        maxval = max(maxval, temp);
+        count[x] = temp;
+    }
+    for (auto x : count)
+    {
+        if(x.se == maxval)
+        {
+            candidate.pb(x.fi);
+        }
+    }
+
+    int random_index = rand() % sz(candidate);
+    return candidate[random_index];
+}
+
+
+// If every rack doesn't satisfy the partition condition, we return {0,0}
+pii find_min_rack_considering_partition(vector<VM> & vms, int pgindex, int p)
+{
+    vector<pii> candidate;
+
+    vector<vint> count(nNetwork+1);
+    int maxval = -1;
+
+    for(int i=1; i<=nNetwork; i++)
+    {
+        count[i].pb(-100);
+        for(int j = 1 ; j<=nRack; j++)
+        {
+            if(partitioncheck(i,j,pgindex, p)==true)
+            {
+                count[i].pb( maxallocate(vms, i , j) );
+                maxval = max(maxval, count[i][j]);
+            }
+            else
+            {
+                count[i].pb(-2);
             }
         }
     }
-    return temp;
+    REP1(i, nNetwork)
+    {
+        REP1(j, nRack)
+        {
+            if(count[i][j] ==maxval)candidate.pb({i,j});
+        }
+    }
+
+    if(sz(candidate)==0)return {0,0};
+
+    int random_index = rand() % sz(candidate);
+    return candidate[random_index];
+}
+
+//Given the network condition,
+// If every rack doesn't satisfy the partition condition, we return {0,0}
+pii find_min_rack_considering_partition(vector<VM> & vms, int pgindex, int p, int network)
+{
+    vector<pii> candidate;
+
+    vint count(nRack+1);
+    int maxval = -1;
+
+    
+    for(int j = 1 ; j<=nRack; j++)
+    {
+        if(partitioncheck(network,j,pgindex, p)==true)
+        {
+            count[j] = maxallocate(vms,network , j) ;
+            maxval = max(maxval, count[j]);
+        }
+        else
+        {
+            count[j] = -2;
+        }
+        
+    }
+    
+    REP1(j, nRack)
+    {
+        if(count[j] ==maxval)candidate.pb({network,j});
+    }
+    
+
+    if(sz(candidate)==0)return {0,0};
+
+    int random_index = rand() % sz(candidate);
+    return candidate[random_index];
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////// where "answer", "storage","leftover" is updated //////////////////////////////////////
+//////////////////////////////////// Should be called "once" ///////////////////////////////////////////////
+// Already known that it is possible to assign.
+// Allocate only considering the cpu, memory, and type
+//O(235000 * 100)
+
+// allocate vms into a single rack
+void allocate_with_no_constraint(vector<VM> & vms, vector<vector<int>> & answer, int network, int rack)
+{
+    // info about vms
+    int n = sz(vms);
+    int cpu = vms[0].info.cpu;
+    int memory = vms[0].info.memory;
+    int type = vms[0].info.numacount;
+    // random starting index of pm
+    int pm_index = random(nPm);
+    int numa_index = random(nNuma);
+    int toassign = 0;
+
+    while(toassign < n)
+    {
+        
+            
+            // allocate in this position!!
+        if( canallocate(vms[toassign],network, rack, pm_index, numa_index))
+        {
+            update(vms[toassign],network, rack, pm_index, numa_index);
+            answer[toassign][0] = network;
+            answer[toassign][1] = rack;
+            answer[toassign][2] = pm_index;
+            if(type==1)answer[toassign][3] = numa_index;
+            else
+            {
+                    bool changed = false;
+                    if(numa_index % 2 ==0){changed=true;numa_index--;}
+                    answer[toassign][3] = numa_index;
+                    answer[toassign][4] = numa_index+1;
+                    if(changed)numa_index++;
+            }
+            toassign ++;
+            if(toassign==n)break;
+        }
+
+        next(numa_index, nNuma);
+        if(numa_index==1)next(pm_index, nPm);
+    }
+}
+
+//allocate vms into a network
+
+void allocate_with_no_constraint(vector<VM> & vms, vector<vector<int>> & answer, int network)
+{
+    // info about vms
+    int n = sz(vms);
+    int cpu = vms[0].info.cpu;
+    int memory = vms[0].info.memory;
+    int type = vms[0].info.numacount;
+    // random starting index 
+    int rack_index = random(nRack);
+    int pm_index = random(nPm);
+    int numa_index = random(nNuma);
+    // the index of vms to assign location
+    int toassign = 0;
+
+    while(toassign < n)
+    {            
+            // allocate in this position!!
+            while( canallocate(vms[toassign],network, rack_index, pm_index, numa_index))
+            {
+                update(vms[toassign],network, rack_index, pm_index, numa_index);
+                answer[toassign][0] = network;
+                answer[toassign][1] = rack_index;
+                answer[toassign][2] = pm_index;
+                if(type==1)answer[toassign][3] = numa_index;
+                else
+                {
+                    bool changed =false;
+                    if(numa_index % 2 ==0){changed=true;numa_index--;}
+                    answer[toassign][3] = numa_index;
+                    answer[toassign][4] = numa_index+1;
+                    if(changed)numa_index++;
+                }
+                toassign ++;
+                if(toassign==n)break;
+
+            }
+
+        
+        // update the three indices
+        next(numa_index, nNuma);
+        if(numa_index==1)next(pm_index, nPm);
+        if(numa_index==1 && pm_index == 1)next(rack_index, nRack);
+    }
+}
+
+
+//allocate vms into a resource
+void allocate_with_no_constraint(vector<VM> & vms, vector<vector<int>> & answer)
+{
+    // info about vms
+    int n = sz(vms);
+    int cpu = vms[0].info.cpu;
+    int memory = vms[0].info.memory;
+    int type = vms[0].info.numacount;
+    // random starting index 
+    int network_index = random(nNetwork);
+    int rack_index = random(nRack);
+    int pm_index = random(nPm);
+    int numa_index = random(nNuma);
+    // the index of vms to assign location
+    int toassign = 0;
+
+    while(toassign < n)
+    {
+                    
+            // allocate in this position!!
+        while( canallocate(vms[toassign],network_index, rack_index, pm_index, numa_index))
+        {
+            update(vms[toassign],network_index, rack_index, pm_index, numa_index);
+            answer[toassign][0] = network_index;
+            answer[toassign][1] = rack_index;
+            answer[toassign][2] = pm_index;
+            if(type==1)answer[toassign][3] = numa_index;
+            else
+            {
+                bool changed = false;
+                    if(numa_index % 2 ==0){changed=true;numa_index--;}
+                    answer[toassign][3] = numa_index;
+                    answer[toassign][4] = numa_index+1;
+                    if(changed)numa_index++;
+            }
+            toassign ++;
+            if(toassign==n)break;
+        }
+
+        // update the three indices
+        next(numa_index, nNuma);
+        if(numa_index==1)next(pm_index, nPm);
+        if(numa_index==1 && pm_index == 1)next(rack_index, nRack);
+        if(numa_index==1 && pm_index==1 && rack_index==1)next(network_index, nNetwork);
+    }
+}
+
+//allocate vms into a resource, but considering partition constraint
+void allocate_with_constraint(vector<VM> & vms, vector<vector<int>> & answer, int pgindex, int p)
+{
+    // info about vms
+    int n = sz(vms);
+    int cpu = vms[0].info.cpu;
+    int memory = vms[0].info.memory;
+    int type = vms[0].info.numacount;
+    // random starting index 
+
+    int pm_index = random(nPm);
+    int numa_index = random(nNuma);
+
+    // the index of vms to assign location
+    int toassign = 0;
+
+    vpii possibleracks = possiblerack(pgindex, p);
+    int m =sz(possibleracks);
+    int pointer = random(m)-1;
+
+    while(toassign < n)
+    {
+        
+            
+        // allocate in this position!!
+        while( canallocate(vms[toassign],possibleracks[pointer].fi,possibleracks[pointer].se, pm_index, numa_index))
+        {
+            update(vms[toassign],possibleracks[pointer].fi,possibleracks[pointer].se, pm_index, numa_index);
+            answer[toassign][0] = possibleracks[pointer].fi;
+            answer[toassign][1] = possibleracks[pointer].se;
+            answer[toassign][2] = pm_index;
+            if(type==1)answer[toassign][3] = numa_index;
+            else
+            {
+                bool changed = false;
+                    if(numa_index % 2 ==0){changed=true;numa_index--;}
+                    answer[toassign][3] = numa_index;
+                    answer[toassign][4] = numa_index+1;
+                    if(changed)numa_index++;
+            }
+            toassign ++;
+            if(toassign==n)break;
+        }
+        // update the three indices
+        next(numa_index, nNuma);
+        if(numa_index==1)next(pm_index, nPm);
+        if(numa_index==1 && pm_index == 1)pointer = (pointer+1)%m;
+    }
+}
+
+void allocate_with_constraint(vector<VM> & vms, vector<vector<int>> & answer, int pgindex, int p, int network)
+{
+    // info about vms
+    int n = sz(vms);
+    int cpu = vms[0].info.cpu;
+    int memory = vms[0].info.memory;
+    int type = vms[0].info.numacount;
+    // random starting index 
+
+    int pm_index = random(nPm);
+    int numa_index = random(nNuma);
+
+    // the index of vms to assign location
+    int toassign = 0;
+
+    vpii possibleracks = possiblerack(pgindex, p, network);
+    int m =sz(possibleracks);
+    int pointer = random(m)-1;
+
+    while(toassign < n)
+    {
+        
+            
+        // allocate in this position!!
+        while( canallocate(vms[toassign],possibleracks[pointer].fi,possibleracks[pointer].se, pm_index, numa_index))
+        {
+            update(vms[toassign],possibleracks[pointer].fi,possibleracks[pointer].se, pm_index, numa_index);
+            answer[toassign][0] = possibleracks[pointer].fi;
+            answer[toassign][1] = possibleracks[pointer].se;
+            answer[toassign][2] = pm_index;
+            if(type==1)answer[toassign][3] = numa_index;
+            else
+            {
+                bool changed = false;
+                    if(numa_index % 2 ==0){changed=true;numa_index--;}
+                    answer[toassign][3] = numa_index;
+                    answer[toassign][4] = numa_index+1;
+                    if(changed)numa_index++;
+            }
+            toassign ++;
+            if(toassign==n)break;
+        }
+        // update the three indices
+        next(numa_index, nNuma);
+        if(numa_index==1)next(pm_index, nPm);
+        if(numa_index==1 && pm_index == 1)pointer = (pointer+1)%m;
+    }
+}
+// allocate one vm into a single rack
+void allocate_one_with_no_constraint(VM vm0, vector<vector<int>> & answer, int i,int network, int rack)
+{
+    // info about vms
+    int cpu = vm0.info.cpu;
+    int memory = vm0.info.memory;
+    int type = vm0.info.numacount;
+    // random starting index of pm
+    int pm_index = random(nPm);
+    int numa_index = random(nNuma);
+    int toassign = 0;
+
+    while(toassign < 1)
+    {
+        
+            
+            // allocate in this position!!
+            if( canallocate(vm0,network, rack, pm_index, numa_index))
+            {
+                update(vm0,network, rack, pm_index, numa_index);
+                answer[i][0] = network;
+                answer[i][1] = rack;
+                answer[i][2] = pm_index;
+                if(type==1)answer[i][3] = numa_index;
+                else
+                {
+                    bool changed = false;
+                    if(numa_index % 2 ==0){ changed=true;numa_index--;}
+                    answer[i][3] = numa_index;
+                    answer[i][4] = numa_index+1;
+                    if(changed)numa_index++;
+                }
+                toassign ++;
+            }
+
+        
+        next(numa_index, nNuma);
+        if(nNuma==1)next(pm_index, nPm);
+    }
+}
+
+//////////////////////////////////////////////////////////////////////////////////////////////
+////////////////////////////////////////// VM Allocation /////////////////////////////////////
+
+
+// given vector of virtual machines, 
+// 1. return whether it is possible to allocate
+// 2. If so, return the allocation in answer vector
+
+bool allocate(vector<VM> & vms, vector< vector<int> > & answer)
+{
+    //vms shares the same vm property and are in sam pg!!(might have different partition)
+
+    int n = sz(vms);
+
+    //information about the needed virtual machines
+    int cpu = vms[0].info.cpu;
+    int memory = vms[0].info.memory;
+    int type = vms[0].info.numacount;
+
+    //information about the pg
+    int predefined_network = networknumofpg[vms[0].pg.index];
+    int raffinity = vms[0].pg.r_affinity;
+    int naffinity = vms[0].pg.n_affinity;
+    int pgindex= vms[0].pg.index;
+    
+    //lets just consider the hard constraints
+    //hard constraints can be
+    // 1. hard rack affinity
+    // 2. hard network affinity
+    // 3. hard rack anti affinity with partition(same partition cannot be in sam rack) 
+    bool differentrack = false;
+    if(n>=2 && vms[0].partition!= vms[1].partition)differentrack=true;
+
+    bool possible =true;
+
+    // first the case where everything needs to be in the same rack
+    // No partition conditions, called once
+    if(raffinity == 2)
+    {
+        // find where to locate
+        pii loc = find_min_rack(vms);
+        // check if it possible to allocate
+        int max_possible_allocation = maxallocate(vms, loc.fi, loc.se);
+        // if impossible, return false
+        if(max_possible_allocation < n)possible = false;
+        // if possible
+        else
+        {
+            allocate_with_no_constraint(vms, answer, loc.fi, loc.se);
+        }
+    }
+    // The second case is when everything needs to be in the same network
+    // There can be predefined network or not
+    else if(naffinity == 2)
+    {
+        //first vm in this pg!! 
+        //We first try to place them in same rack. If impossible, try placing in same memory
+        if(predefined_network == 0 && differentrack ==false) 
+        {
+            pii loc = find_min_rack(vms);
+            int max_possible_allocation = maxallocate(vms, loc.fi, loc.se);
+            if(max_possible_allocation >= n )
+            {
+                //now, all of the vms in this pg should be in this network!
+                networknumofpg[vms[0].pg.index] = loc.fi;
+                allocate_with_no_constraint(vms, answer, loc.fi, loc.se);
+            }
+            else
+            {
+                int network = random(nNetwork);
+                int max_possible_allocation = maxallocate(vms, network);
+                if(max_possible_allocation >=n)
+                {
+                    networknumofpg[vms[0].pg.index] = network;
+                    allocate_with_no_constraint(vms, answer, network);
+                }
+                else
+                {
+                    possible =false;
+                }
+            }
+        }
+        else if(predefined_network==0 && differentrack ==true)
+        {
+            int network = random(nNetwork);
+            REP0(i,n)
+            {
+                bool updatedanswer = false;
+                vpii candidates = findallrack(pgindex, vms[i].partition,network);
+                if(sz(candidates) > 0)
+                {
+                    pii loc = find_min_rack_among_candidates(vms, candidates);
+                    if(maxallocate(vms, loc.fi, loc.se )>=1)
+                    {
+                        updatedanswer = true;
+                        allocate_one_with_no_constraint(vms[i],  answer, i, loc.fi, loc.se);
+                    }
+                }
+                if(updatedanswer==false)
+                {
+                    vector<VM> temp = { vms[i]};
+                    pii loc = find_min_rack_considering_partition(temp, pgindex, vms[i].partition);
+                    if(loc!=make_pair(0,0))
+                    {
+                        if (maxallocate(temp,loc.fi, loc.se )>=1)
+                        {
+                            updatedanswer=true;
+                            allocate_one_with_no_constraint(vms[i], answer, i, loc.fi,loc.se);
+                        }
+                    }
+                }
+                if(updatedanswer==false)
+                {
+                    possible=false;
+                    break;
+                }
+            }
+
+        }
+        // the network to assign is fixed.
+        else
+        {
+            int network = predefined_network;
+            if(vms[0].partition==0)
+            {
+                pii loc = find_min_rack(vms, network);
+                int max_possible_allocation = maxallocate(vms, loc.fi, loc.se);
+                if(max_possible_allocation >= n )
+                {
+                    allocate_with_no_constraint(vms, answer, loc.fi, loc.se);
+                }
+                else possible=false;
+            }
+            else if(differentrack==false)
+            {
+                bool updatedanswer = false;
+
+            // find all rack that already has that partition val
+            vpii candidates = findallrack(pgindex, vms[0].partition, network);
+            // Choose the optimal among the candidates
+            if(sz(candidates) > 0)
+            {
+                pii loc = find_min_rack_among_candidates(vms, candidates);
+                int max_possible_allocation = maxallocate(vms, loc.fi, loc.se);
+                if(max_possible_allocation >= n)
+                {
+                    allocate_with_no_constraint(vms, answer, loc.fi, loc.se);
+                    updatedanswer = true;
+                }
+            }
+            // If not, just try to choose from one rack that suffices the partition condition
+            if(updatedanswer==false)
+            {
+                pii loc = find_min_rack_considering_partition(vms, pgindex, vms[0].partition, network);
+                int max_possible_allocation = 0;
+                if(loc!=make_pair(0,0))max_possible_allocation = maxallocate(vms, loc.fi, loc.se);
+                if(max_possible_allocation  >= n )
+                {
+                    allocate_with_no_constraint(vms, answer, loc.fi, loc.se);
+                    updatedanswer=true;
+                }
+            }
+            // If that doesn't work, we need to use the whole network
+            if(updatedanswer==false)
+            {
+                int max_possible_allocation = maxallocate_constraint(vms, pgindex, vms[0].partition, network);
+                if(max_possible_allocation  >= n )
+                {
+                    allocate_with_constraint(vms, answer, pgindex, vms[0].partition, network);
+                    updatedanswer=true;
+                }
+            }
+            if(updatedanswer==false)possible=false;
+            }
+            else
+            {
+                REP0(i,n)
+            {
+                bool updatedanswer = false;
+                vpii candidates = findallrack(pgindex, vms[i].partition, network);
+                if(sz(candidates) > 0)
+                {
+                    pii loc = find_min_rack_among_candidates(vms, candidates);
+                    if(maxallocate(vms, loc.fi, loc.se )>=1)
+                    {
+                        updatedanswer = true;
+                        allocate_one_with_no_constraint(vms[i],  answer, i, loc.fi, loc.se);
+                    }
+                }
+                if(updatedanswer==false)
+                {
+                    vector<VM> temp = { vms[i]};
+                    pii loc = find_min_rack_considering_partition(temp, pgindex, vms[i].partition);
+                    if(loc!=make_pair(0,0))
+                    {
+                        if (maxallocate(temp,loc.fi, loc.se )>=1)
+                        {
+                            updatedanswer=true;
+                            allocate_one_with_no_constraint(vms[i], answer, i, loc.fi,loc.se);
+                        }
+                    }
+                }
+                if(updatedanswer==false)
+                {
+                    possible=false;
+                    break;
+                }
+            }
+
+
+            }
+
+        }
+    }
+    // The last case is where there is no condition on network, rack.
+    // We only need to consider partition
+    else
+    {
+        // first. the case where there is no partition constraint
+        // We first try to put them in the same rack
+        // If we can't, try putting in by distributing them in all resource
+        if(vms[0].partition==0)
+        {
+            pii loc = find_min_rack(vms);
+            int max_possible_allocation = maxallocate(vms, loc.fi, loc.se);
+            if(max_possible_allocation  >= n )allocate_with_no_constraint(vms, answer, loc.fi, loc.se);
+            else
+            {
+                // now we use every resource to place 
+                max_possible_allocation = maxallocate(vms);
+                if(max_possible_allocation < n)possible =false;
+                else
+                {
+                    allocate_with_no_constraint(vms, answer);
+                }
+            }
+        }
+        // this is the case where they have same partition constraint
+        else if(differentrack==false)
+        {
+            bool updatedanswer = false;
+
+            // find all rack that already has that partition val
+            vpii candidates = findallrack(pgindex, vms[0].partition);
+            // Choose the optimal among the candidates
+            if(sz(candidates) > 0)
+            {
+                pii loc = find_min_rack_among_candidates(vms, candidates);
+                int max_possible_allocation = maxallocate(vms, loc.fi, loc.se);
+                if(max_possible_allocation >= n)
+                {
+                    allocate_with_no_constraint(vms, answer, loc.fi, loc.se);
+                    updatedanswer = true;
+                }
+            }
+            // If not, just try to choose from one rack that suffices the partition condition
+            if(updatedanswer==false)
+            {
+                pii loc = find_min_rack_considering_partition(vms, pgindex, vms[0].partition);
+                int max_possible_allocation = 0;
+                if(loc!=make_pair(0,0))max_possible_allocation = maxallocate(vms, loc.fi, loc.se);
+                if(max_possible_allocation  >= n )
+                {
+                    allocate_with_no_constraint(vms, answer, loc.fi, loc.se);
+                    updatedanswer=true;
+                }
+            }
+            // If that doesn't work, we need to use the whole resource
+            if(updatedanswer==false)
+            {
+                int max_possible_allocation = maxallocate_constraint(vms, pgindex, vms[0].partition);
+                if(max_possible_allocation  >= n )
+                {
+                    allocate_with_constraint(vms, answer, pgindex, vms[0].partition);
+                    updatedanswer=true;
+                }
+            }
+            if(updatedanswer==false)possible=false;
+        }
+        // This is the case where they all have different partition constraint
+        else
+        {
+            //하나씩 따질것임.
+            REP0(i,n)
+            {
+                bool updatedanswer = false;
+                vpii candidates = findallrack(pgindex, vms[i].partition);
+                if(sz(candidates) > 0)
+                {
+                    pii loc = find_min_rack_among_candidates(vms, candidates);
+                    if(maxallocate(vms, loc.fi, loc.se )>=1)
+                    {
+                        updatedanswer = true;
+                        allocate_one_with_no_constraint(vms[i],  answer, i, loc.fi, loc.se);
+                    }
+                }
+                if(updatedanswer==false)
+                {
+                    vector<VM> temp = { vms[i]};
+                    pii loc = find_min_rack_considering_partition(temp, pgindex, vms[i].partition);
+                    if(loc!=make_pair(0,0))
+                    {
+                        if (maxallocate(temp,loc.fi, loc.se )>=1)
+                        {
+                            updatedanswer=true;
+                            allocate_one_with_no_constraint(vms[i], answer, i, loc.fi,loc.se);
+                        }
+                    }
+                }
+                if(updatedanswer==false)
+                {
+                    possible=false;
+                    break;
+                }
+            }
+        }
+
+    }
+
+    
+
+    return possible;
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////
+//////////////////////////////////////// delte algorithms /////////////////////////////////////////////////
+//O(1)
+vector<int> findVM(int index)
+{
+    // given the index of vm, find the network , rack, pm, numanode
+    return vm[index].loc;
 }
 
 
@@ -147,8 +1350,7 @@ void deleteVM(int index)
     // delete the particular vm from storage
     // we need to keep track of storage, leftover, and family
     vint pos = findVM(index);
-    int pgindex = vm[index].pg.index;
-    if(sz(pos)==4)
+    if(vm[index].info.numacount==1)
     {
         storage[pos[0]][pos[1]][pos[2]][pos[3]].erase(index);
         leftover[pos[0]][pos[1]][pos[2]][pos[3]].cpu += vm[index].info.cpu;
@@ -158,832 +1360,23 @@ void deleteVM(int index)
     else
     {
         storage[pos[0]][pos[1]][pos[2]][pos[3]].erase(index);
-        storage[pos[0]][pos[1]][pos[2]][pos[4]].erase(index);
+        storage[pos[0]][pos[1]][pos[2]][pos[3]+1].erase(index);
 
         leftover[pos[0]][pos[1]][pos[2]][pos[3]].cpu += vm[index].info.cpu;
         leftover[pos[0]][pos[1]][pos[2]][pos[3]].memory += vm[index].info.memory;
 
-        leftover[pos[0]][pos[1]][pos[2]][pos[4]].cpu += vm[index].info.cpu;
-        leftover[pos[0]][pos[1]][pos[2]][pos[4]].memory += vm[index].info.memory;
+        leftover[pos[0]][pos[1]][pos[2]][pos[3]+1].cpu += vm[index].info.cpu;
+        leftover[pos[0]][pos[1]][pos[2]][pos[3]+1].memory += vm[index].info.memory;
     }
-    //family[pgindex].erase(index);
 
 }
 
-
-/////////////////////////////////////////////////////////////////////////////////////////////////////////
-//////////////////////////////////////// allocation1 algorithms ///////////////////////////////////////////
-
-
-
-vector<int> naivefill1(VM vm0)   //only need to satisfy cpu, memory condition
-{
-    int cpu = vm0.info.cpu;
-    int memory = vm0.info.memory;
-    int numacount = vm0.info.numacount; // =1
-    int partition = vm0.partition;
-    int pg = vm0.pg.index;
-
-    vint ans = {};
-
-    random_shuffle(all(permutation));
-    REP0(i, nTotal)
-    {
-        int numa_index = permutation[i]%nNuma;
-        int pm_index = permutation[i]%(nTotal/nNetwork/nRack) / (nNuma);
-        int rack_index = permutation[i] % (nTotal/nNetwork) / (nNuma*nPm); 
-        int network_index  = permutation[i] / (nTotal/nNetwork);
-
-        numa_index ++;
-        pm_index ++;
-        rack_index ++;
-        network_index ++;
-
-        Numanode & target = leftover[network_index][rack_index][pm_index][numa_index];  
-        set<int> &s = storage[network_index][rack_index][pm_index][numa_index];   
-
-        if(target.cpu >= cpu && target.memory >= memory)
-        {
-            bool problem =false;
-
-            REP1(iter1, nPm){REP1(iter2, nNuma){
-            set<int> sprime = storage[network_index][rack_index][iter1][iter2];
-            for(auto x : sprime)
-            {
-                if(vm[x].pg.index == pg && vm[x].pg.npartition!=0 && vm[x].partition!=partition)
-                {
-                    problem = true;
-                    break;
-                }
-            }
-            if(problem)break;
-            }
-            if(problem)break;
-            }
-
-            if(!problem)
-            {
-                // update leftover
-                target.cpu -= cpu;
-                target.memory -= memory;
-
-                ans = {network_index, rack_index, pm_index, numa_index};
-                // update target
-                s.insert(vm0.index);
-                break;
-            }
-            
-
-        }
-
-
-    }
-
-    return ans;
-
-
-}
-
-vector<int> naivefill1_network(VM vm0, int network)   //only need to satisfy cpu, memory condition
-{
-    int cpu = vm0.info.cpu;
-    int memory = vm0.info.memory;
-    int numacount = vm0.info.numacount; // =1
-    int partition = vm0.partition;
-    int pg = vm0.pg.index;
-
-    vint ans = {};
-
-    random_shuffle(all(permutation2));
-    REP0(i, nTotal/nNetwork)
-    {
-        int numa_index = permutation2[i]%nNuma;
-        int pm_index = permutation2[i]%(nTotal/nNetwork/nRack) / (nNuma);
-        int rack_index = permutation2[i] % (nTotal/nNetwork) / (nNuma*nPm); 
-        int network_index  =network;
-
-        numa_index ++;
-        pm_index ++;
-        rack_index ++;
-
-        Numanode & target = leftover[network_index][rack_index][pm_index][numa_index];  
-        set<int> &s = storage[network_index][rack_index][pm_index][numa_index];  
-
-        if(target.cpu >= cpu && target.memory >= memory)
-        {
-            bool problem =false;
-
-            REP1(iter1, nPm){REP1(iter2, nNuma){
-            set<int> sprime = storage[network_index][rack_index][iter1][iter2];
-            for(auto x : sprime)
-            {
-                if(vm[x].pg.index == pg && vm[x].pg.npartition!=0 && vm[x].partition!=partition)
-                {
-                    problem = true;
-                    break;
-                }
-            }
-            if(problem)break;
-            }
-            if(problem)break;
-            }
-
-            if(!problem)
-            {
-                // update leftover
-                target.cpu -= cpu;
-                target.memory -= memory;
-
-                ans = {network_index, rack_index, pm_index, numa_index};
-                // update target
-                s.insert(vm0.index);
-                break;
-            }
-            
-
-        }
-
-
-    }
-
-    return ans;
-
-
-}
-
-vector<int> naivefill1_rack(VM vm0, int network, int rack)   //only need to satisfy cpu, memory condition
-{
-    int cpu = vm0.info.cpu;
-    int memory = vm0.info.memory;
-    int numacount = vm0.info.numacount; // =1
-    int partition = vm0.partition;
-    int pg = vm0.pg.index;
-
-    vint ans = {};
-
-    random_shuffle(all(permutation3));
-    REP0(i, nTotal/nNetwork/nRack)
-    {
-        int numa_index = permutation[i]%nNuma;
-        int pm_index = permutation[i]%(nTotal/nNetwork/nRack) / (nNuma);
-        int rack_index = rack;
-        int network_index  = network;
-
-        numa_index ++;
-        pm_index ++;
-
-        Numanode & target = leftover[network_index][rack_index][pm_index][numa_index];   
-        set<int> &s = storage[network_index][rack_index][pm_index][numa_index];   
-
-        if(target.cpu >= cpu && target.memory >= memory)
-        {
-            bool problem =false;
-            
-            REP1(iter1, nPm){REP1(iter2, nNuma){
-            set<int> sprime = storage[network_index][rack_index][iter1][iter2];
-            for(auto x : sprime)
-            {
-                if(vm[x].pg.index == pg && vm[x].pg.npartition!=0 && vm[x].partition!=partition)
-                {
-                    problem = true;
-                    break;
-                }
-            }
-            if(problem)break;
-            }
-            if(problem)break;
-            }
-
-            if(!problem)
-            {
-                // update leftover
-                target.cpu -= cpu;
-                target.memory -= memory;
-
-                ans = {network_index, rack_index, pm_index, numa_index};
-                // update target
-                s.insert(vm0.index);
-                break;
-            }
-            
-
-        }
-
-
-    }
-
-    return ans;
-
-
-}
-
-
-
-bool allocate1(vector<VM> & vms, vector< vector<int> > & answer)
-{
-    // 0 . vm, answer are zero based
-    // 1.update the storage, leftover
-    // 2. udate answer vector
-    // 3. return possibility
-
-    //vms shares the same vm property and are in same pg!!(might have different partition)
-
-    int n = sz(vms);
-
-    //shared parameter of n vms
-    int cpu = vms[0].info.cpu;
-    int memory = vms[0].info.memory;
-    int numacount = vms[0].info.numacount;
-
-    int raffinity = vms[0].pg.r_affinity;
-    int naffinity = vms[0].pg.n_affinity;
-    
-    //lets just consider the hard constraints
-    //hard constraints can be
-    // 1. hard rack affinity
-    // 2. hard network affinity
-    // 3. hard rack anti affinity with partition(same partition cannot be in sam rack) 
-
-    bool possible =true;
-
-    if(raffinity == 2)
-    {
-        possible =false;
-
-        for(int network = 1; network<=nNetwork;network++)
-        {
-            for(int rack=1; rack<=nRack; rack++)
-            {
-            bool breaked = false;
-            REP0(i, n)
-            {
-                VM x = vms[i];
-
-                vint v;
-
-            
-                
-                v = naivefill1_rack(x, network,rack);
-            
-                if(sz(v)==0)
-                {
-                    
-                    breaked=true;
-                    // 되돌리기
-                    for(int j=0; j<i;j++)
-                    {
-                        int network_index = answer[j][0];
-                        int rack_index = answer[j][1];
-                        int pm_index = answer[j][2];
-                        int numa_index = answer[j][3];
-                        Numanode & target = leftover[network_index][rack_index][pm_index][numa_index];   
-                        set<int> &s = storage[network_index][rack_index][pm_index][numa_index]; 
-                        target.cpu += cpu;
-                        target.memory += memory;
-                        s.erase(vms[j].index);
-                    }
-                    break;
-                }
-
-                answer[i] = v;
-
-            }
-            if(breaked==false)
-            {
-                possible=true;
-                break;
-            }
-            }
-            if(possible==true)break;
-               
-        }
-
-        
-    }
-    else if(naffinity==2)
-    {
-
-        int predefined = memorynumofpg[vms[0].pg.index];
-        if(predefined==0){
-            possible=false;
-        for(int network = 1; network<=nNetwork;network++)
-        {
-            bool breaked = false;
-            REP0(i, n)
-            {
-                VM x = vms[i];
-
-                vint v;
-
-            
-                
-                v = naivefill1_network(x, network);
-            
-                if(sz(v)==0)
-                {
-
-                    // 되돌리기
-                    for(int j=0; j<i;j++)
-                    {
-                        int network_index = answer[j][0];
-                        int rack_index = answer[j][1];
-                        int pm_index = answer[j][2];
-                        int numa_index = answer[j][3];
-                        Numanode & target = leftover[network_index][rack_index][pm_index][numa_index];   
-                        set<int> &s = storage[network_index][rack_index][pm_index][numa_index]; 
-                        target.cpu += cpu;
-                        target.memory += memory;
-                        s.erase(vms[j].index);
-                    }
-                    
-                    breaked=true;
-                    break;
-                }
-
-                answer[i] = v;
-
-            }
-            if(breaked==false)
-            {
-                //이제 이 pg의 vm들은 반드시 이 network에 들어와야함.
-                memorynumofpg[vms[0].pg.index] = network;
-                possible=true;
-                break;
-            }
-               
-        }
-        }
-        else{
-            int network = predefined;
-
-            REP0(i, n)
-            {
-                VM x = vms[i];
-
-                vint v;
-
-            
-                
-                v = naivefill1_network(x, network);
-            
-                if(sz(v)==0)
-                {
-                    possible = false;
-                    break;
-                }
-
-                answer[i] = v;
-
-            }
-
-        }
-
-    }
-    else{
-        REP0(i, n)
-        {
-            VM x = vms[i];
-
-            vint v = naivefill1(x);
-            if(sz(v)==0)
-            {
-                possible=false;
-                break;
-            }
-            answer[i] = v;
-        }
-    }
-
-    
-
-    
-
-    return possible;
-}
-
-
-/////////////////////////////////////////////////////////////////////////////////////////////////////////
-//////////////////////////////////////// allocation2 algorithms ///////////////////////////////////////////
-
-
-vector<int> naivefill2(VM vm0)   //only need to satisfy cpu, memory condition
-{
-    int cpu = vm0.info.cpu;
-    int memory = vm0.info.memory;
-    int numacount = vm0.info.numacount; // =1
-    int partition = vm0.partition;
-    int pg = vm0.pg.index;
-
-    vint ans = {};
-
-    random_shuffle(all(permutation));
-    REP0(i, nTotal)
-    {
-        int numa_index = permutation[i]%nNuma;
-        int pm_index = permutation[i]%(nTotal/nNetwork/nRack) / (nNuma);
-        int rack_index = permutation[i] % (nTotal/nNetwork) / (nNuma*nPm); 
-        int network_index  = permutation[i] / (nTotal/nNetwork);
-
-        numa_index ++;
-        pm_index ++;
-        rack_index ++;
-        network_index ++;
-
-        Numanode & target1 = leftover[network_index][rack_index][pm_index][numa_index];  
-        set<int> &s1 = storage[network_index][rack_index][pm_index][numa_index];   
-
-        Numanode & target2 = leftover[network_index][rack_index][pm_index][numa_index%nNuma+1];   
-        set<int> &s2 = storage[network_index][rack_index][pm_index][numa_index%nNuma+1];   
-
-        if(target1.cpu >= cpu && target1.memory >= memory && target2.cpu >= cpu && target2.memory >= memory)
-        {
-            bool problem =false;
-
-            REP1(iter1, nPm){REP1(iter2, nNuma){
-            set<int> sprime = storage[network_index][rack_index][iter1][iter2];
-            for(auto x : sprime)
-            {
-                if(vm[x].pg.index == pg && vm[x].pg.npartition!=0 && vm[x].partition!=partition)
-                {
-                    problem = true;
-                    break;
-                }
-            }
-            if(problem)break;
-            }
-            if(problem)break;
-            }
-
-            if(!problem)
-            {
-                // update leftover
-                target1.cpu -= cpu;
-                target1.memory -= memory;
-                target2.cpu -= cpu;
-                target2.memory -= memory;
-
-                ans = {network_index, rack_index, pm_index, min(numa_index, numa_index%nNuma+1), max(numa_index, numa_index%nNuma+1)};
-                // update target
-                s1.insert(vm0.index);
-                s2.insert(vm0.index);
-
-                break;
-            }
-            
-
-        }
-
-
-    }
-
-    return ans;
-
-
-}
-
-vector<int> naivefill2_network(VM vm0, int network)   //only need to satisfy cpu, memory condition
-{
-    int cpu = vm0.info.cpu;
-    int memory = vm0.info.memory;
-    int numacount = vm0.info.numacount; // =1
-    int partition = vm0.partition;
-    int pg = vm0.pg.index;
-
-    vint ans = {};
-
-    random_shuffle(all(permutation2));
-    REP0(i, nTotal/nNetwork)
-    {
-        int numa_index = permutation2[i]%nNuma;
-        int pm_index = permutation2[i]%(nTotal/nNetwork/nRack) / (nNuma);
-        int rack_index = permutation2[i] % (nTotal/nNetwork) / (nNuma*nPm); 
-        int network_index  =network;
-
-        numa_index ++;
-        pm_index ++;
-        rack_index ++;
-
-        Numanode & target1 = leftover[network_index][rack_index][pm_index][numa_index];  
-        set<int> &s1 = storage[network_index][rack_index][pm_index][numa_index];   
-
-        Numanode & target2 = leftover[network_index][rack_index][pm_index][numa_index%nNuma+1];   
-        set<int> &s2 = storage[network_index][rack_index][pm_index][numa_index%nNuma+1];   
-
-        if(target1.cpu >= cpu && target1.memory >= memory && target2.cpu >= cpu && target2.memory >= memory)
-        {
-            bool problem =false;
-            
-            REP1(iter1, nPm){REP1(iter2, nNuma){
-            set<int> sprime = storage[network_index][rack_index][iter1][iter2];
-            for(auto x : sprime)
-            {
-                if(vm[x].pg.index == pg && vm[x].pg.npartition!=0 && vm[x].partition!=partition)
-                {
-                    problem = true;
-                    break;
-                }
-            }
-            if(problem)break;
-            }
-            if(problem)break;
-            }
-
-            if(!problem)
-            {
-                // update leftover
-                target1.cpu -= cpu;
-                target1.memory -= memory;
-                target2.cpu -= cpu;
-                target2.memory -= memory;
-
-                ans = {network_index, rack_index, pm_index, min(numa_index, numa_index%nNuma+1), max(numa_index, numa_index%nNuma+1)};
-                // update target
-                s1.insert(vm0.index);
-                s2.insert(vm0.index);
-
-                break;
-            }
-            
-
-        }
-
-
-    }
-
-    return ans;
-
-
-}
-
-vector<int> naivefill2_rack(VM vm0, int network, int rack)   //only need to satisfy cpu, memory condition
-{
-    int cpu = vm0.info.cpu;
-    int memory = vm0.info.memory;
-    int numacount = vm0.info.numacount; // =1
-    int partition = vm0.partition;
-    int pg = vm0.pg.index;
-
-    vint ans = {};
-
-    random_shuffle(all(permutation3));
-    REP0(i, nTotal/nNetwork/nRack)
-    {
-        int numa_index = permutation[i]%nNuma;
-        int pm_index = permutation[i]%(nTotal/nNetwork/nRack) / (nNuma);
-        int rack_index = rack;
-        int network_index  = network;
-
-        numa_index ++;
-        pm_index ++;
-
-        Numanode & target1 = leftover[network_index][rack_index][pm_index][numa_index];  
-        set<int> &s1 = storage[network_index][rack_index][pm_index][numa_index];   
-
-        Numanode & target2 = leftover[network_index][rack_index][pm_index][numa_index%nNuma+1];   
-        set<int> &s2 = storage[network_index][rack_index][pm_index][numa_index%nNuma+1];   
-
-        if(target1.cpu >= cpu && target1.memory >= memory && target2.cpu >= cpu && target2.memory >= memory)
-        {
-            bool problem =false;
-            
-            REP1(iter1, nPm){REP1(iter2, nNuma){
-            set<int> sprime = storage[network_index][rack_index][iter1][iter2];
-            for(auto x : sprime)
-            {
-                if(vm[x].pg.index == pg && vm[x].pg.npartition!=0 && vm[x].partition!=partition)
-                {
-                    problem = true;
-                    break;
-                }
-            }
-            if(problem)break;
-            }
-            if(problem)break;
-            }
-
-            if(!problem)
-            {
-                // update leftover
-                target1.cpu -= cpu;
-                target1.memory -= memory;
-                target2.cpu -= cpu;
-                target2.memory -= memory;
-
-                ans = {network_index, rack_index, pm_index, min(numa_index, numa_index%nNuma+1), max(numa_index, numa_index%nNuma+1)};
-                // update target
-                s1.insert(vm0.index);
-                s2.insert(vm0.index);
-
-                break;
-            }
-            
-
-        }
-
-
-    }
-
-    return ans;
-
-
-}
-
-
-bool allocate2(vector<VM> & vms, vector< vector<int> > & answer)
-{
-    // 0 . vm, answer are zero based
-    // 1.update the storage
-    // 2. udate answer vector
-    // 3. return possibility
-
-    //vms shares the same vm property and are in sam pg!!(might have different partition)
-
-    int n = sz(vms);
-
-    //shared parameter of n vms
-    int cpu = vms[0].info.cpu;
-    int memory = vms[0].info.memory;
-    int numacount = vms[0].info.numacount;
-
-    int raffinity = vms[0].pg.r_affinity;
-    int naffinity = vms[0].pg.n_affinity;
-    
-    //lets just consider the hard constraints
-    //hard constraints can be
-    // 1. hard rack affinity
-    // 2. hard network affinity
-    // 3. hard rack anti affinity with partition(same partition cannot be in sam rack) 
-
-    bool possible =true;
-
-    if(raffinity == 2)
-    {
-        possible =false;
-
-        for(int network = 1; network<=nNetwork;network++)
-        {
-            for(int rack=1; rack<=nRack; rack++)
-            {
-            bool breaked = false;
-            REP0(i, n)
-            {
-                VM x = vms[i];
-
-                vint v;
-
-            
-                
-                v = naivefill2_rack(x, network,rack);
-            
-                if(sz(v)==0)
-                {
-                    for(int j=0; j<i;j++)
-                    {
-                        int network_index = answer[j][0];
-                        int rack_index = answer[j][1];
-                        int pm_index = answer[j][2];
-                        int numa_index1 = answer[j][3];
-                        int numa_index2 = answer[j][4];
-                        Numanode & target1 = leftover[network_index][rack_index][pm_index][numa_index1];   
-                        set<int> &s1 = storage[network_index][rack_index][pm_index][numa_index1]; 
-                        target1.cpu += cpu;
-                        target1.memory += memory;
-                        s1.erase(vms[j].index);
-                        Numanode & target2 = leftover[network_index][rack_index][pm_index][numa_index2];   
-                        set<int> &s2 = storage[network_index][rack_index][pm_index][numa_index2]; 
-                        target2.cpu += cpu;
-                        target2.memory += memory;
-                        s2.erase(vms[j].index);
-                    }
-                    breaked=true;
-                    break;
-                }
-
-                answer[i] = v;
-
-            }
-            if(breaked==false)
-            {
-                possible=true;
-                break;
-            }
-            }
-            if(possible==true)break;
-               
-        }
-
-        
-    }
-    else if(naffinity==2)
-    {
-
-        int predefined = memorynumofpg[vms[0].pg.index];
-
-        if(predefined==0){
-            possible = false;
-        for(int network = 1; network<=nNetwork;network++)
-        {
-            bool breaked = false;
-            REP0(i, n)
-            {
-                VM x = vms[i];
-
-                vint v;
-
-            
-                
-                v = naivefill2_network(x, network);
-            
-                if(sz(v)==0)
-                {
-                    for(int j=0; j<i;j++)
-                    {
-                        int network_index = answer[j][0];
-                        int rack_index = answer[j][1];
-                        int pm_index = answer[j][2];
-                        int numa_index1 = answer[j][3];
-                        int numa_index2 = answer[j][4];
-                        Numanode & target1 = leftover[network_index][rack_index][pm_index][numa_index1];   
-                        set<int> &s1 = storage[network_index][rack_index][pm_index][numa_index1]; 
-                        target1.cpu += cpu;
-                        target1.memory += memory;
-                        s1.erase(vms[j].index);
-                        Numanode & target2 = leftover[network_index][rack_index][pm_index][numa_index2];   
-                        set<int> &s2 = storage[network_index][rack_index][pm_index][numa_index2]; 
-                        target2.cpu += cpu;
-                        target2.memory += memory;
-                        s2.erase(vms[j].index);
-                    }
-                    breaked=true;
-                    break;
-                }
-
-                answer[i] = v;
-
-            }
-            if(breaked==false)
-            {
-                memorynumofpg[vms[0].pg.index] = network;
-
-                possible=true;
-                break;
-            }
-               
-        }
-        }
-        else{
-            int network = predefined;
-
-            REP0(i, n)
-            {
-                VM x = vms[i];
-
-                vint v;
-
-            
-                
-                v = naivefill2_network(x, network);
-            
-                if(sz(v)==0)
-                {
-                    possible = false;
-                    break;
-                }
-
-                answer[i] = v;
-
-            }
-
-        }
-
-    }
-    else{
-        REP0(i, n)
-        {
-            VM x = vms[i];
-
-            vint v = naivefill2(x);
-            if(sz(v)==0)
-            {
-                possible=false;
-                break;
-            }
-            answer[i] = v;
-        }
-    }
-
-    
-
-    
-
-    return possible;
-}
 
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
 //////////////////////////////////////// three types of requests ////////////////////////////////////////
 
-
+//O(1)
 void PG_creation()
 {
     //new pg is described. We will store it into pgtype vector
@@ -1026,64 +1419,36 @@ bool VM_creation()
         newvm.partition = (partition!=-1? partition : i);
 
         temp.pb(newvm);
+        vm.pb(newvm);
     }
 
     // check if we can allocate the new Vms and if so, print it out!
     // We use two functions each for numacount=1 and numacount=2
     //return whether it is possible or not
     bool possible;
+    vector<vector<int>> answer;
     if (vmtype[typeofvm].numacount ==1 )
     {
         vector<int> v(4,0);
-        vector<vector<int>> answer(ncreate, v);
-        possible = allocate1(temp, answer);
-
-        if(possible)
-        {
-            // update vm
-            for (auto x : temp)vm.pb(x);
-            
-            //print out allocation
-            REP0(i, ncreate)
-            {
-                REP0(j,4)
-                {
-                    cout<<answer[i][j]<<" ";
-                }
-                cout<<endl;
-            }
-        }
-        else cout<<-1<<endl;
-
+        answer.resize(ncreate, v);
     }
-    else{
+    else
+    {
         vector<int> v(5,0);
-        vector<vector<int>> answer(ncreate, v);
-        possible = allocate2(temp, answer);
+        answer.resize(ncreate, v);
 
-        if(possible)
-        {
-            // update vm
-            for (auto x : temp)vm.pb(x);
-            
-            //print out allocation
-            REP0(i, ncreate)
-            {
-                REP0(j,5)
-                {
-                    cout<<answer[i][j]<<" ";
-                }
-                cout<<endl;
-            }
-        }
-        else cout<<-1<<endl;
     }
-    
 
+
+    possible = allocate(temp, answer);
+
+    if(possible)print2d(answer);
+    else cout<<-1<<endl;
+    
     return possible;
 }
 
-
+//~O(1)
 void VM_deletion()
 {
     // we are going to delete ndelte virtual machines!
@@ -1123,28 +1488,13 @@ void make()
 
 }
 
-void createpermutation()
-{
-    nTotal =  nNetwork*nRack*nPm*nNuma;
-    REP0(i, nNetwork*nRack*nPm*nNuma)permutation.pb(i);
-
-    REP0(i, nRack*nPm*nNuma)permutation2.pb(i);
-
-
-    REP0(i, nPm*nNuma)permutation3.pb(i);
-
-
-
-}
-
 
 void read_basic()
 {
     //read in basic stuff like number of network, racks, PMs, NUMA nodes;
     cin>>nNetwork>>nRack>>nPm>>nNuma;
 
-    createpermutation();
-
+    nTotal =  nNetwork*nRack*nPm*nNuma;
  
     //read in information of each numa nodes
     nodeinfo.resize(nNuma+1);
@@ -1171,10 +1521,13 @@ int main()
 
     //read in request and handle (loop until termination(4))
     //request < 13500 , VMs < 235000
-
+    int countr = 0;
     int request_type; cin>>request_type;
     while(request_type !=4 )
     {
+        countr++;
+        // test if the time constraint is the fundamental problem
+        
 
         if(request_type==1)
         {
